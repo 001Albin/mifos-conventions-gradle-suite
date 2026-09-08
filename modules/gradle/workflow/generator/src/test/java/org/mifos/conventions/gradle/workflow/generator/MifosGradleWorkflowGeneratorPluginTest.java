@@ -12,13 +12,16 @@ import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Modifier;
 import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.expr.NameExpr;
 import com.github.javaparser.ast.stmt.BlockStmt;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.github.javaparser.ast.type.Type;
 import com.github.javaparser.printer.DefaultPrettyPrinter;
 import com.github.javaparser.printer.configuration.DefaultPrinterConfiguration;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 
 import lombok.extern.slf4j.Slf4j;
@@ -239,6 +242,75 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
         log.error("\n----- Fineract{}RequestMapper.java -----\n{}", domain,
                 new DefaultPrettyPrinter(new DefaultPrinterConfiguration()).print(cu));
+    }
+
+
+    @Test
+    void generateResponseModel() throws Exception {
+        var exampleDir = "src/test/java/org/mifos/conventions/gradle/workflow/generator/example/";
+        var apiCode = FileUtils.readFileToString(new File(exampleDir + "CurrencyApi.java"), UTF_8);
+        var parsed = StaticJavaParser.parse(apiCode);
+
+        var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
+                .map(ClassOrInterfaceDeclaration::getNameAsString)
+                .orElseThrow();
+        var domain = apiName.replace("Api", "");
+        var pkg = "org.mifos.workflow.fineract.usecase." + domain.toLowerCase() + ".core.model";
+
+        for (var method : parsed.findAll(MethodDeclaration.class)) {
+            var operation = toOperation(method.getNameAsString(), domain);
+            var base = "Fineract" + domain + operation;
+            var fineractType = unwrap(method.getType().asString());
+
+            var sourceFile = new File(exampleDir + "models/" + fineractType + ".java");
+            if (!sourceFile.exists()) {
+                log.error("no source model for {} - skipping", fineractType);
+                continue;
+            }
+            var model = StaticJavaParser.parse(FileUtils.readFileToString(sourceFile, UTF_8));
+
+            var cu = new CompilationUnit();
+            cu.setPackageDeclaration(pkg);
+            cu.addImport("java.io.Serial");
+            cu.addImport("lombok.AllArgsConstructor");
+            cu.addImport("lombok.Builder");
+            cu.addImport("lombok.Data");
+            cu.addImport("lombok.NoArgsConstructor");
+            cu.addImport("lombok.experimental.FieldNameConstants");
+            cu.addImport("org.mifos.commons.boot.core.model.MifosResponse");
+
+            var generated = cu.addClass(base + "Response")
+                    .setPublic(true)
+                    .addAnnotation("Builder")
+                    .addAnnotation("Data")
+                    .addAnnotation("NoArgsConstructor")
+                    .addAnnotation("AllArgsConstructor")
+                    .addAnnotation("FieldNameConstants")
+                    .addImplementedType("MifosResponse");
+
+            generated.addFieldWithInitializer("long", "serialVersionUID",
+                            new NameExpr("1L"), Modifier.Keyword.PRIVATE,
+                            Modifier.Keyword.STATIC, Modifier.Keyword.FINAL)
+                    .addAnnotation("Serial");
+
+            model.findAll(FieldDeclaration.class).stream()
+                    .filter(f -> !f.isStatic())
+                    .forEach(f -> f.getVariables().forEach(v -> {
+                        var type = v.getTypeAsString();
+                        collectImports(type).forEach(cu::addImport);
+                        generated.addField(type, v.getNameAsString()).setPrivate(true);
+                    }));
+
+            log.error("\n----- {}Response.java -----\n{}", base,
+                    new DefaultPrettyPrinter(new DefaultPrinterConfiguration()).print(cu));
+        }
+    }
+
+    private static List<String> collectImports(String type) {
+        var imports = new ArrayList<String>();
+        if (type.contains("Map")) imports.add("java.util.Map");
+        if (type.contains("List")) imports.add("java.util.List");
+        return imports;
     }
 
     private static String unwrap(String type) {
