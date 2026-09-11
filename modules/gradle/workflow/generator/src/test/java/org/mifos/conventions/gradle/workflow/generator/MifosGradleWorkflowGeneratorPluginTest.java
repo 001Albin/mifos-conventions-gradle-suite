@@ -123,9 +123,14 @@ final class MifosGradleWorkflowGeneratorPluginTest {
                     + domain.toLowerCase() + ".core.usecase");
             cu.addImport("org.mifos.commons.boot.core.usecase.MifosUsecase");
 
+            var requestType = method.getParameters().isEmpty() ? "Void" : base + "Request";
+            var responseType = "Void".equals(unwrap(method.getType().asString()))
+                    ? "Void"
+                    : base + "Response";
+
             cu.addInterface(base + "Usecase")
                     .setPublic(true)
-                    .addExtendedType("MifosUsecase<" + base + "Request, " + base + "Response>");
+                    .addExtendedType("MifosUsecase<" + requestType + ", " + responseType + ">");
 
             log.error("\n----- {}Usecase.java -----\n{}", base,
                     new DefaultPrettyPrinter(new DefaultPrinterConfiguration()).print(cu));
@@ -149,7 +154,9 @@ final class MifosGradleWorkflowGeneratorPluginTest {
             var operation = toOperation(method.getNameAsString(), domain);
             var base = "Fineract" + domain + operation;
             var hasParam = !method.getParameters().isEmpty();
-
+            var returnsVoid = "Void".equals(unwrap(method.getType().asString()));
+            var requestType = hasParam ? base + "Request" : "Void";
+            var responseType = returnsVoid ? "Void" : base + "Response";
             var apiPackage = parsed.getPackageDeclaration()
                     .map(p -> p.getNameAsString())
                     .orElse("");
@@ -159,8 +166,12 @@ final class MifosGradleWorkflowGeneratorPluginTest {
             cu.addImport("lombok.RequiredArgsConstructor");
             cu.addImport("lombok.extern.slf4j.Slf4j");
             cu.addImport(apiPackage + "." + apiName);
-            cu.addImport(pkg + ".core.model." + base + "Request");
-            cu.addImport(pkg + ".core.model." + base + "Response");
+            if (hasParam) {
+                cu.addImport(pkg + ".core.model." + base + "Request");
+            }
+            if (!returnsVoid) {
+                cu.addImport(pkg + ".core.model." + base + "Response");
+            }
             cu.addImport(pkg + ".core.usecase." + base + "Usecase");
             cu.addImport(pkg + ".mapping.Fineract" + domain + "RequestMapper");
             cu.addImport("org.springframework.stereotype.Component");
@@ -181,8 +192,8 @@ final class MifosGradleWorkflowGeneratorPluginTest {
                     : "var response = api." + method.getNameAsString() + "().getBody();";
 
             impl.addMethod("execute", Modifier.Keyword.PUBLIC)
-                    .setType(base + "Response")
-                    .addParameter(base + "Request", "request")
+                    .setType(responseType)
+                    .addParameter(requestType, "request")
                     .addAnnotation("Override")
                     .setBody(new BlockStmt()
                             .addStatement(call)
@@ -261,6 +272,11 @@ final class MifosGradleWorkflowGeneratorPluginTest {
             var operation = toOperation(method.getNameAsString(), domain);
             var base = "Fineract" + domain + operation;
             var fineractType = unwrap(method.getType().asString());
+
+            if ("Void".equals(fineractType)) {
+                log.error("{} returns Void - no response model needed", base);
+                continue;
+            }
 
             var sourceFile = new File(exampleDir + "models/" + fineractType + ".java");
             if (!sourceFile.exists()) {
