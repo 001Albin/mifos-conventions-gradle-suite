@@ -6,6 +6,7 @@
 package org.mifos.conventions.gradle.workflow.generator;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.gradle.internal.impldep.org.jsoup.nodes.Entities.EscapeMode.base;
 
 import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
@@ -22,7 +23,9 @@ import com.github.javaparser.printer.DefaultPrettyPrinter;
 import com.github.javaparser.printer.configuration.DefaultPrinterConfiguration;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.io.FileUtils;
@@ -33,7 +36,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
     @Test
     void parse() throws Exception {
         String code = FileUtils.readFileToString(
-                new File("src/test/java/org/mifos/conventions/gradle/workflow/generator/example/CurrencyApi.java"),
+                new File("src/test/resources/example/ClientApi.java"),
                 UTF_8);
 
         // Parse the Java code
@@ -105,7 +108,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
     @Test
     void generateUsecaseInterface() throws Exception {
         String code = FileUtils.readFileToString(
-                new File("src/test/java/org/mifos/conventions/gradle/workflow/generator/example/CurrencyApi.java"),
+                new File("src/test/resources/example/ClientApi.java"),
                 UTF_8);
         var parsed = StaticJavaParser.parse(code);
 
@@ -140,8 +143,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
     @Test
     void generateUsecaseImplementation() throws Exception {
         String code = FileUtils.readFileToString(
-                new File("src/test/java/org/mifos/conventions/gradle/workflow/generator/example/CurrencyApi.java"),
-                UTF_8);
+                new File("src/test/resources/example/ClientApi.java"), UTF_8);
         var parsed = StaticJavaParser.parse(code);
 
         var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
@@ -153,7 +155,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
         parsed.findAll(MethodDeclaration.class).forEach(method -> {
             var operation = toOperation(method.getNameAsString(), domain);
             var base = "Fineract" + domain + operation;
-            var hasParam = !method.getParameters().isEmpty();
+            var hasParam = !method.getParameters().isEmpty();   
             var returnsVoid = "Void".equals(unwrap(method.getType().asString()));
             var requestType = hasParam ? base + "Request" : "Void";
             var responseType = returnsVoid ? "Void" : base + "Response";
@@ -187,9 +189,13 @@ final class MifosGradleWorkflowGeneratorPluginTest {
             impl.addField(apiName, "api").setPrivate(true).setFinal(true);
             impl.addField("Fineract" + domain + "RequestMapper", "mapper").setPrivate(true).setFinal(true);
 
-            var call = hasParam
-                    ? "var response = api." + method.getNameAsString() + "(mapper.map(request)).getBody();"
-                    : "var response = api." + method.getNameAsString() + "().getBody();";
+            var args = method.getParameters().stream()
+                    .map(p -> p.isAnnotationPresent("RequestBody")
+                            ? "mapper.map(request)"
+                            : "request.get" + capitalize(p.getNameAsString()) + "()")
+                    .collect(Collectors.joining(", "));
+
+            var call = "var response = api." + method.getNameAsString() + "(" + args + ").getBody();";
 
             impl.addMethod("execute", Modifier.Keyword.PUBLIC)
                     .setType(responseType)
@@ -207,7 +213,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
     @Test
     void generateMapper() throws Exception {
         String code = FileUtils.readFileToString(
-                new File("src/test/java/org/mifos/conventions/gradle/workflow/generator/example/CurrencyApi.java"),
+                new File("src/test/resources/example/ClientApi.java"),
                 UTF_8);
         var parsed = StaticJavaParser.parse(code);
 
@@ -223,32 +229,39 @@ final class MifosGradleWorkflowGeneratorPluginTest {
         cu.addImport("org.mapstruct.Mapper");
         cu.addImport("org.mifos.boot.commons.mapping.MifosMapperConfiguration");
 
-        var mapper = cu.addInterface("Fineract" + domain + "RequestMapper")
-                .setPublic(true);
-        mapper.addAndGetAnnotation("Mapper")
-                .addPair("config", "MifosMapperConfiguration.class");
+        var mapper = cu.addInterface("Fineract" + domain + "RequestMapper").setPublic(true);
+        mapper.addAndGetAnnotation("Mapper").addPair("config", "MifosMapperConfiguration.class");
+
+        var seen = new HashSet<String>();
 
         parsed.findAll(MethodDeclaration.class).forEach(method -> {
             var operation = toOperation(method.getNameAsString(), domain);
             var base = "Fineract" + domain + operation;
 
-            // request direction: ours -> Fineract's
-            method.getParameters().stream().findFirst().ifPresent(p -> {
-                var fineractType = unwrap(p.getType().asString());
-                cu.addImport(modelPkg + "." + fineractType);
-                mapper.addMethod("map")
-                        .setType(fineractType)
-                        .addParameter(base + "Request", "source")
-                        .setBody(null);
-            });
+            // request direction: ours -> Fineract's, body parameters only
+            method.getParameters().stream()
+                    .filter(p -> p.isAnnotationPresent("RequestBody"))
+                    .findFirst()
+                    .ifPresent(p -> {
+                        var fineractType = unwrap(p.getType().asString());
+                        if (seen.add("req:" + base)) {
+                            cu.addImport(modelPkg + "." + fineractType);
+                            mapper.addMethod("map")
+                                    .setType(fineractType)
+                                    .addParameter(base + "Request", "source")
+                                    .setBody(null);
+                        }
+                    });
 
             // response direction: Fineract's -> ours
             var fineractResponse = unwrap(method.getType().asString());
-            cu.addImport(modelPkg + "." + fineractResponse);
-            mapper.addMethod("map")
-                    .setType(base + "Response")
-                    .addParameter(fineractResponse, "source")
-                    .setBody(null);
+            if (!"Void".equals(fineractResponse) && seen.add("res:" + fineractResponse)) {
+                cu.addImport(modelPkg + "." + fineractResponse);
+                mapper.addMethod("map")
+                        .setType(base + "Response")
+                        .addParameter(fineractResponse, "source")
+                        .setBody(null);
+            }
         });
 
         log.error("\n----- Fineract{}RequestMapper.java -----\n{}", domain,
@@ -258,8 +271,8 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
     @Test
     void generateResponseModel() throws Exception {
-        var exampleDir = "src/test/java/org/mifos/conventions/gradle/workflow/generator/example/";
-        var apiCode = FileUtils.readFileToString(new File(exampleDir + "CurrencyApi.java"), UTF_8);
+        var exampleDir = "src/test/resources/example/";
+        var apiCode = FileUtils.readFileToString(new File(exampleDir + "ClientApi.java"), UTF_8);
         var parsed = StaticJavaParser.parse(apiCode);
 
         var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
@@ -322,6 +335,33 @@ final class MifosGradleWorkflowGeneratorPluginTest {
         }
     }
 
+
+    @Test
+    void parseRealClientApi() throws Exception {
+        String code = FileUtils.readFileToString(
+                new File("src/test/resources/example/ClientApi.java"), UTF_8);
+        var parsed = StaticJavaParser.parse(code);
+
+        var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
+                .map(ClassOrInterfaceDeclaration::getNameAsString)
+                .orElseThrow();
+        var domain = apiName.replace("Api", "");
+
+        log.error("api: {}  domain: {}", apiName, domain);
+
+        parsed.findAll(MethodDeclaration.class).forEach(method -> {
+            log.error("--- {}", method.getNameAsString());
+            log.error("    operation : {}", toOperation(method.getNameAsString(), domain));
+            log.error("    returns   : {}", unwrap(method.getType().asString()));
+            method.getParameters().forEach(p -> {
+                var annotations = p.getAnnotations().stream()
+                        .map(a -> a.getNameAsString())
+                        .toList();
+                log.error("    param     : {} {}  {}", p.getType().asString(), p.getNameAsString(), annotations);
+            });
+        });
+    }
+
     private static List<String> collectImports(String type) {
         var imports = new ArrayList<String>();
         if (type.contains("Map")) imports.add("java.util.Map");
@@ -333,6 +373,10 @@ final class MifosGradleWorkflowGeneratorPluginTest {
         var open = type.indexOf('<');
         var close = type.lastIndexOf('>');
         return open < 0 ? type : unwrap(type.substring(open + 1, close).trim());
+    }
+
+    private static String capitalize(String s) {
+        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
     private static String toOperation(String methodName, String domain) {
