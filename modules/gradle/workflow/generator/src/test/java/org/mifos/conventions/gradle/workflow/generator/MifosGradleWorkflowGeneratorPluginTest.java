@@ -337,6 +337,74 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
 
     @Test
+    void generateRequestModel() throws Exception {
+        String code = FileUtils.readFileToString(
+                new File("src/test/resources/example/ClientApi.java"),
+                UTF_8);
+        var parsed = StaticJavaParser.parse(code);
+
+        var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
+                .map(ClassOrInterfaceDeclaration::getNameAsString)
+                .orElseThrow();
+        var domain = apiName.replace("Api", "");
+        var pkg = "org.mifos.workflow.fineract.usecase." + domain.toLowerCase() + ".core.model";
+
+        parsed.findAll(MethodDeclaration.class).forEach(method -> {
+            var operation = toOperation(method.getNameAsString(), domain);
+            var base = "Fineract" + domain + operation;
+
+            var fields = method.getParameters().stream()
+                    .filter(p -> !p.isAnnotationPresent("RequestBody"))
+                    .toList();
+
+            if (fields.isEmpty()) {
+                log.error("{} has no non-body parameters - use Void", base);
+                return;
+            }
+
+            var cu = new CompilationUnit();
+            cu.setPackageDeclaration(pkg);
+            cu.addImport("java.io.Serial");
+            cu.addImport("lombok.AllArgsConstructor");
+            cu.addImport("lombok.Builder");
+            cu.addImport("lombok.Data");
+            cu.addImport("lombok.NoArgsConstructor");
+            cu.addImport("lombok.experimental.FieldNameConstants");
+            cu.addImport("org.mifos.commons.boot.core.model.MifosRequest");
+
+            var generated = cu.addClass(base + "Request")
+                    .setPublic(true)
+                    .addAnnotation("Builder")
+                    .addAnnotation("Data")
+                    .addAnnotation("NoArgsConstructor")
+                    .addAnnotation("AllArgsConstructor")
+                    .addAnnotation("FieldNameConstants")
+                    .addImplementedType("MifosRequest");
+
+            generated.addFieldWithInitializer("long", "serialVersionUID",
+                            new NameExpr("1L"), Modifier.Keyword.PRIVATE,
+                            Modifier.Keyword.STATIC, Modifier.Keyword.FINAL)
+                    .addAnnotation("Serial");
+
+            fields.forEach(p -> {
+                var type = p.getType().asString();
+                collectImports(type).forEach(cu::addImport);
+                if (type.startsWith("Optional")) {
+                    cu.addImport("java.util.Optional");
+                }
+                if (type.contains("MultipartFile")) {
+                    cu.addImport("org.springframework.web.multipart.MultipartFile");
+                }
+                generated.addField(type, p.getNameAsString()).setPrivate(true);
+            });
+
+            log.error("\n----- {}Request.java -----\n{}", base,
+                    new DefaultPrettyPrinter(new DefaultPrinterConfiguration()).print(cu));
+        });
+    }
+
+
+    @Test
     void parseRealClientApi() throws Exception {
         String code = FileUtils.readFileToString(
                 new File("src/test/resources/example/ClientApi.java"), UTF_8);
@@ -380,12 +448,6 @@ final class MifosGradleWorkflowGeneratorPluginTest {
     }
 
     private static String toOperation(String methodName, String domain) {
-        var name = methodName;
-        for (var verb : List.of("retrieve", "update", "create", "delete", "get", "post", "put")) {
-            if (name.startsWith(verb)) {
-                return Character.toUpperCase(verb.charAt(0)) + verb.substring(1);
-            }
-        }
-        return Character.toUpperCase(name.charAt(0)) + name.substring(1);
+        return Character.toUpperCase(methodName.charAt(0)) + methodName.substring(1);
     }
 }
