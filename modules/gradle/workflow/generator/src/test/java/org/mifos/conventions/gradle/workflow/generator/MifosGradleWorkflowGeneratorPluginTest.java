@@ -107,9 +107,13 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
     @Test
     void generateUsecaseInterface() throws Exception {
-        String code = FileUtils.readFileToString(
-                new File("src/test/resources/example/ClientApi.java"),
-                UTF_8);
+        for (var apiFile : apiFiles()) {
+            generateUsecaseInterface(apiFile);
+        }
+    }
+
+    private void generateUsecaseInterface(File apiFile) throws Exception {
+        String code = FileUtils.readFileToString(apiFile, UTF_8);
         var parsed = StaticJavaParser.parse(code);
 
         var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
@@ -142,8 +146,13 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
     @Test
     void generateUsecaseImplementation() throws Exception {
-        String code = FileUtils.readFileToString(
-                new File("src/test/resources/example/ClientApi.java"), UTF_8);
+        for (var apiFile : apiFiles()) {
+            generateUsecaseImplementation(apiFile);
+        }
+    }
+
+    private void generateUsecaseImplementation(File apiFile) throws Exception {
+        String code = FileUtils.readFileToString(apiFile, UTF_8);
         var parsed = StaticJavaParser.parse(code);
 
         var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
@@ -155,7 +164,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
         parsed.findAll(MethodDeclaration.class).forEach(method -> {
             var operation = toOperation(method.getNameAsString(), domain);
             var base = "Fineract" + domain + operation;
-            var hasParam = !method.getParameters().isEmpty();   
+            var hasParam = !method.getParameters().isEmpty();
             var returnsVoid = "Void".equals(unwrap(method.getType().asString()));
             var requestType = hasParam ? base + "Request" : "Void";
             var responseType = returnsVoid ? "Void" : base + "Response";
@@ -212,9 +221,13 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
     @Test
     void generateMapper() throws Exception {
-        String code = FileUtils.readFileToString(
-                new File("src/test/resources/example/ClientApi.java"),
-                UTF_8);
+        for (var apiFile : apiFiles()) {
+            generateMapper(apiFile);
+        }
+    }
+
+    private void generateMapper(File apiFile) throws Exception {
+        String code = FileUtils.readFileToString(apiFile, UTF_8);
         var parsed = StaticJavaParser.parse(code);
 
         var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
@@ -245,7 +258,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
                     .ifPresent(p -> {
                         var fineractType = unwrap(p.getType().asString());
                         if (seen.add("req:" + base)) {
-                            cu.addImport(modelPkg + "." + fineractType);
+                            importsFor(fineractType, modelPkg).forEach(cu::addImport);
                             mapper.addMethod("map")
                                     .setType(fineractType)
                                     .addParameter(base + "Request", "source")
@@ -255,8 +268,10 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
             // response direction: Fineract's -> ours
             var fineractResponse = unwrap(method.getType().asString());
-            if (!"Void".equals(fineractResponse) && seen.add("res:" + fineractResponse)) {
-                cu.addImport(modelPkg + "." + fineractResponse);
+            if ("Void".equals(fineractResponse) || isBuiltIn(fineractResponse)) {
+                log.error("{} returns {} - no mapping needed", base, fineractResponse);
+            } else if (seen.add("res:" + fineractResponse)) {
+                importsFor(fineractResponse, modelPkg).forEach(cu::addImport);
                 mapper.addMethod("map")
                         .setType(base + "Response")
                         .addParameter(fineractResponse, "source")
@@ -271,8 +286,14 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
     @Test
     void generateResponseModel() throws Exception {
+        for (var apiFile : apiFiles()) {
+            generateResponseModel(apiFile);
+        }
+    }
+
+    private void generateResponseModel(File apiFile) throws Exception {
         var exampleDir = "src/test/resources/example/";
-        var apiCode = FileUtils.readFileToString(new File(exampleDir + "ClientApi.java"), UTF_8);
+        var apiCode = FileUtils.readFileToString(apiFile, UTF_8);
         var parsed = StaticJavaParser.parse(apiCode);
 
         var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
@@ -280,6 +301,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
                 .orElseThrow();
         var domain = apiName.replace("Api", "");
         var pkg = "org.mifos.workflow.fineract.usecase." + domain.toLowerCase() + ".core.model";
+        var modelPkg = parsed.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("") + ".models";
 
         for (var method : parsed.findAll(MethodDeclaration.class)) {
             var operation = toOperation(method.getNameAsString(), domain);
@@ -288,6 +310,18 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
             if ("Void".equals(fineractType)) {
                 log.error("{} returns Void - no response model needed", base);
+                continue;
+            }
+            if (isBuiltIn(fineractType)) {
+                log.error("{} returns the built-in type {} - no response model needed", base, fineractType);
+                continue;
+            }
+
+            // A collection return becomes a response that holds the collection.
+            if (isCollection(fineractType)) {
+                log.error("\n----- {}Response.java -----\n{}", base,
+                        new DefaultPrettyPrinter(new DefaultPrinterConfiguration())
+                                .print(collectionResponse(base, fineractType, pkg, modelPkg)));
                 continue;
             }
 
@@ -326,7 +360,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
                     .filter(f -> !f.isStatic())
                     .forEach(f -> f.getVariables().forEach(v -> {
                         var type = v.getTypeAsString();
-                        collectImports(type).forEach(cu::addImport);
+                        importsFor(type, modelPkg).forEach(cu::addImport);
                         generated.addField(type, v.getNameAsString()).setPrivate(true);
                     }));
 
@@ -338,9 +372,13 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
     @Test
     void generateRequestModel() throws Exception {
-        String code = FileUtils.readFileToString(
-                new File("src/test/resources/example/ClientApi.java"),
-                UTF_8);
+        for (var apiFile : apiFiles()) {
+            generateRequestModel(apiFile);
+        }
+    }
+
+    private void generateRequestModel(File apiFile) throws Exception {
+        String code = FileUtils.readFileToString(apiFile, UTF_8);
         var parsed = StaticJavaParser.parse(code);
 
         var apiName = parsed.findFirst(ClassOrInterfaceDeclaration.class)
@@ -348,6 +386,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
                 .orElseThrow();
         var domain = apiName.replace("Api", "");
         var pkg = "org.mifos.workflow.fineract.usecase." + domain.toLowerCase() + ".core.model";
+        var modelPkg = parsed.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("") + ".models";
 
         parsed.findAll(MethodDeclaration.class).forEach(method -> {
             var operation = toOperation(method.getNameAsString(), domain);
@@ -388,13 +427,7 @@ final class MifosGradleWorkflowGeneratorPluginTest {
 
             fields.forEach(p -> {
                 var type = p.getType().asString();
-                collectImports(type).forEach(cu::addImport);
-                if (type.startsWith("Optional")) {
-                    cu.addImport("java.util.Optional");
-                }
-                if (type.contains("MultipartFile")) {
-                    cu.addImport("org.springframework.web.multipart.MultipartFile");
-                }
+                importsFor(type, modelPkg).forEach(cu::addImport);
                 generated.addField(type, p.getNameAsString()).setPrivate(true);
             });
 
@@ -430,18 +463,124 @@ final class MifosGradleWorkflowGeneratorPluginTest {
         });
     }
 
-    private static List<String> collectImports(String type) {
+    /** Types the generator strips away; the value inside is what we actually care about. */
+    private static final List<String> WRAPPERS = List.of("ResponseEntity", "Optional");
+
+    /** Collections we keep, because "a list of X" is not the same as "an X". */
+    private static final List<String> COLLECTIONS = List.of("List", "Set", "Collection");
+
+    /** Types that need no import. */
+    private static final List<String> BUILT_IN = List.of(
+            "String", "Long", "Integer", "Boolean", "Double", "Float", "Short", "Byte",
+            "Character", "Object", "Number", "Void", "void",
+            "long", "int", "boolean", "double", "float", "short", "byte", "char");
+
+    /** Types that come from the JDK rather than the Fineract models package. */
+    private static final java.util.Map<String, String> JDK_TYPES = java.util.Map.ofEntries(
+            java.util.Map.entry("List", "java.util.List"),
+            java.util.Map.entry("Set", "java.util.Set"),
+            java.util.Map.entry("Map", "java.util.Map"),
+            java.util.Map.entry("Collection", "java.util.Collection"),
+            java.util.Map.entry("Optional", "java.util.Optional"),
+            java.util.Map.entry("LocalDate", "java.time.LocalDate"),
+            java.util.Map.entry("LocalDateTime", "java.time.LocalDateTime"),
+            java.util.Map.entry("LocalTime", "java.time.LocalTime"),
+            java.util.Map.entry("OffsetDateTime", "java.time.OffsetDateTime"),
+            java.util.Map.entry("Instant", "java.time.Instant"),
+            java.util.Map.entry("Duration", "java.time.Duration"),
+            java.util.Map.entry("BigDecimal", "java.math.BigDecimal"),
+            java.util.Map.entry("BigInteger", "java.math.BigInteger"),
+            java.util.Map.entry("UUID", "java.util.UUID"),
+            java.util.Map.entry("MultipartFile", "org.springframework.web.multipart.MultipartFile"));
+
+    /**
+     * Strips wrapper types such as ResponseEntity and Optional, but leaves collections intact:
+     * ResponseEntity&lt;List&lt;CashierData&gt;&gt; becomes List&lt;CashierData&gt;, not CashierData.
+     */
+    private static String unwrap(String type) {
+        for (var wrapper : WRAPPERS) {
+            if (type.startsWith(wrapper + "<")) {
+                return unwrap(innerType(type));
+            }
+        }
+        return type;
+    }
+
+    /** The type between the outermost angle brackets, or the type itself when there are none. */
+    private static String innerType(String type) {
+        var open = type.indexOf('<');
+        var close = type.lastIndexOf('>');
+        return open < 0 ? type : type.substring(open + 1, close).trim();
+    }
+
+    private static boolean isCollection(String type) {
+        return COLLECTIONS.stream().anyMatch(c -> type.startsWith(c + "<"));
+    }
+
+    private static boolean isBuiltIn(String type) {
+        return BUILT_IN.contains(type);
+    }
+
+    /**
+     * A response class for an operation that returns a collection, holding the collection
+     * in a single "items" field rather than pretending it is one element.
+     */
+    private static CompilationUnit collectionResponse(String base, String collectionType,
+                                                      String pkg, String modelPkg) {
+        var cu = new CompilationUnit();
+        cu.setPackageDeclaration(pkg);
+        cu.addImport("java.io.Serial");
+        cu.addImport("lombok.AllArgsConstructor");
+        cu.addImport("lombok.Builder");
+        cu.addImport("lombok.Data");
+        cu.addImport("lombok.NoArgsConstructor");
+        cu.addImport("lombok.experimental.FieldNameConstants");
+        cu.addImport("org.mifos.commons.boot.core.model.MifosResponse");
+        importsFor(collectionType, modelPkg).forEach(cu::addImport);
+
+        var generated = cu.addClass(base + "Response")
+                .setPublic(true)
+                .addAnnotation("Builder")
+                .addAnnotation("Data")
+                .addAnnotation("NoArgsConstructor")
+                .addAnnotation("AllArgsConstructor")
+                .addAnnotation("FieldNameConstants")
+                .addImplementedType("MifosResponse");
+
+        generated.addFieldWithInitializer("long", "serialVersionUID",
+                        new NameExpr("1L"), Modifier.Keyword.PRIVATE,
+                        Modifier.Keyword.STATIC, Modifier.Keyword.FINAL)
+                .addAnnotation("Serial");
+
+        generated.addField(collectionType, "items").setPrivate(true);
+        return cu;
+    }
+
+    /**
+     * Every import a field of this type needs: JDK types from their own packages, Fineract
+     * models from the models package, and nothing at all for built-ins like String.
+     */
+    private static List<String> importsFor(String type, String modelPkg) {
         var imports = new ArrayList<String>();
-        if (type.contains("Map")) imports.add("java.util.Map");
-        if (type.contains("List")) imports.add("java.util.List");
+        for (var name : type.split("[<>,\\s\\[\\]]+")) {
+            if (name.isBlank() || isBuiltIn(name)) {
+                continue;
+            }
+            var jdk = JDK_TYPES.get(name);
+            if (jdk != null) {
+                imports.add(jdk);
+            } else if (modelExists(name)) {
+                imports.add(modelPkg + "." + name);
+            }
+        }
         return imports;
     }
 
-    private static String unwrap(String type) {
-        var open = type.indexOf('<');
-        var close = type.lastIndexOf('>');
-        return open < 0 ? type : unwrap(type.substring(open + 1, close).trim());
+    private static boolean modelExists(String simpleName) {
+        return new File(EXAMPLE_DIR + "models/" + simpleName + ".java").exists();
     }
+
+    private static final String EXAMPLE_DIR = "src/test/resources/example/";
 
     private static String capitalize(String s) {
         return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
@@ -450,4 +589,15 @@ final class MifosGradleWorkflowGeneratorPluginTest {
     private static String toOperation(String methodName, String domain) {
         return Character.toUpperCase(methodName.charAt(0)) + methodName.substring(1);
     }
+
+    private static File[] apiFiles() {
+        var files = new File("src/test/resources/example")
+                .listFiles((dir, name) -> name.endsWith("Api.java"));
+        if (files == null || files.length == 0) {
+            throw new IllegalStateException("no *Api.java files in src/test/resources/example");
+        }
+        java.util.Arrays.sort(files);
+        return files;
+    }
+
 }
